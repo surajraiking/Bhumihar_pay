@@ -1,1 +1,18 @@
-{"name":"suraj-rai-pay","version":"1.0.0","private":true,"description":"Suraj Rai Pay mobile app","scripts":{"cap:add":"cap add android","cap:sync":"cap sync android"},"dependencies":{"@capacitor/android":"^7.4.3","@capacitor/core":"^7.4.3"},"devDependencies":{"@capacitor/cli":"^7.4.3"}}
+{
+  "name": "suraj-rai-pay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Suraj Rai Pay mobile app",
+  "scripts": {
+    "cap:add": "cap add android",
+    "cap:sync": "cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^7.4.3",
+    "@capacitor/core": "^7.4.3"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^7.4.3",
+    "typescript": "^5.9.2"
+  }
+}
