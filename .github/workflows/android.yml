@@ -15,6 +15,10 @@ jobs:
           node-version: 22
       - name: Install dependencies
         run: npm install
+      - name: Prepare web bundle
+        run: |
+          mkdir -p www
+          cp index.html styles.css app.js manifest.webmanifest sw.js www/
       - name: Add Android platform
         run: npx cap add android
       - name: Sync web app
