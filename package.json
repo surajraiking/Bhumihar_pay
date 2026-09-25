@@ -5,14 +5,25 @@
   "description": "Suraj Rai Pay mobile app",
   "scripts": {
     "cap:add": "cap add android",
-    "cap:sync": "cap sync android"
+    "cap:sync": "cap sync android",
+    "backend:dev": "tsx server/index.ts",
+    "backend:start": "node dist/server/index.js",
+    "backend:typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@capacitor/android": "^7.4.3",
-    "@capacitor/core": "^7.4.3"
+    "@capacitor/core": "^7.4.3",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.5.2",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0",
+    "helmet": "^8.1.0",
+    "pg": "^8.16.3",
+    "zod": "^4.1.11"
   },
   "devDependencies": {
     "@capacitor/cli": "^7.4.3",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "tsx": "^4.20.5"
   }
 }
