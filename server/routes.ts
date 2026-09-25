@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import express, { type Request, type Response } from "express";
+import express from "express";
 import { z } from "zod";
 import { pool, withTransaction } from "./db.js";
 import { env } from "./config.js";
@@ -15,16 +15,18 @@ const createPaymentSchema = z.object({
   purpose: z.enum(["MERCHANT_PAYMENT", "CHECKOUT"]).default("CHECKOUT")
 });
 
-api.get("/health", async (_req, res) => {
-  await pool.query("SELECT 1");
-  res.json({ ok: true, service: "suraj-rai-pay-api", environment: env.NODE_ENV });
+api.get("/health", async (_req, res, next) => {
+  try {
+    await pool.query("SELECT 1");
+    res.json({ ok: true, service: "suraj-rai-pay-api", environment: env.NODE_ENV });
+  } catch (error) { next(error); }
 });
 
 api.post("/v1/payments/orders", async (req, res, next) => {
   try {
     const input = createPaymentSchema.parse(req.body);
     const orderId = "srp_" + crypto.randomUUID().replaceAll("-", "").slice(0, 24);
-    const returnUrl = env.PUBLIC_BASE_URL ? env.PUBLIC_BASE_URL + "/v1/payments/return" : "https://example.invalid/payment-return";
+    const returnUrl = env.PUBLIC_BASE_URL ? env.PUBLIC_BASE_URL + "/api/v1/payments/return" : "https://example.invalid/payment-return";
     const notifyUrl = env.PUBLIC_BASE_URL ? env.PUBLIC_BASE_URL + "/v1/webhooks/cashfree" : "https://example.invalid/webhook";
 
     await pool.query(
@@ -32,30 +34,33 @@ api.post("/v1/payments/orders", async (req, res, next) => {
       [orderId, "cashfree", input.amountPaise, "INR", input.purpose, "CREATED"]
     );
 
-    const providerOrder = await createCashfreeOrder({
-      orderId,
-      amountPaise: input.amountPaise,
-      customerId: input.customerId,
-      customerPhone: input.customerPhone,
-      customerEmail: input.customerEmail,
-      returnUrl,
-      notifyUrl
-    });
+    try {
+      const providerOrder = await createCashfreeOrder({
+        orderId,
+        amountPaise: input.amountPaise,
+        customerId: input.customerId,
+        customerPhone: input.customerPhone,
+        customerEmail: input.customerEmail,
+        returnUrl,
+        notifyUrl
+      });
 
-    await pool.query(
-      "UPDATE payment_orders SET provider_order_id=$1, provider_session_id=$2, status=$3, updated_at=now() WHERE id=$4",
-      [providerOrder.order_id, providerOrder.payment_session_id ?? null, "PENDING", orderId]
-    );
+      await pool.query(
+        "UPDATE payment_orders SET provider_order_id=$1, provider_session_id=$2, status=$3, updated_at=now() WHERE id=$4",
+        [providerOrder.order_id, providerOrder.payment_session_id ?? null, "PENDING", orderId]
+      );
 
-    res.status(201).json({
-      orderId,
-      provider: "cashfree",
-      paymentSessionId: providerOrder.payment_session_id,
-      status: "PENDING"
-    });
-  } catch (error) {
-    next(error);
-  }
+      res.status(201).json({
+        orderId,
+        provider: "cashfree",
+        paymentSessionId: providerOrder.payment_session_id,
+        status: "PENDING"
+      });
+    } catch (providerError) {
+      await pool.query("UPDATE payment_orders SET status='FAILED', updated_at=now() WHERE id=$1", [orderId]);
+      throw providerError;
+    }
+  } catch (error) { next(error); }
 });
 
 api.get("/v1/payments/orders/:id", async (req, res, next) => {
@@ -70,9 +75,7 @@ api.get("/v1/payments/orders/:id", async (req, res, next) => {
       return;
     }
     res.json({ orderId: order.id, status: order.status });
-  } catch (error) {
-    next(error);
-  }
+  } catch (error) { next(error); }
 });
 
 function mapStatus(status?: string): string {
@@ -87,19 +90,19 @@ function mapStatus(status?: string): string {
 
 api.get("/v1/payments/return", async (req, res) => {
   res.status(200).json({
-    message: "Payment return received. The app must query the backend for the authoritative status.",
+    message: "Payment return received. Query the backend for the authoritative status.",
     orderId: req.query.order_id ?? null
   });
 });
 
-export async function processCashfreeWebhook(event: {
-  order?: { order_id?: string };
-  payment?: { payment_status?: string; cf_payment_id?: string };
-  data?: { order?: { order_id?: string }; payment?: { payment_status?: string; cf_payment_id?: string } };
-}) {
-  const orderId = event.order?.order_id ?? event.data?.order?.order_id;
-  const paymentStatus = event.payment?.payment_status ?? event.data?.payment?.payment_status;
-  const paymentId = event.payment?.cf_payment_id ?? event.data?.payment?.cf_payment_id;
+export async function processCashfreeWebhook(
+  event: any,
+  providerEventId: string,
+  providerPaymentAmountPaise?: number
+) {
+  const orderId = event?.order?.order_id ?? event?.data?.order?.order_id;
+  const paymentStatus = event?.payment?.payment_status ?? event?.data?.payment?.payment_status;
+  const paymentId = event?.payment?.cf_payment_id ?? event?.data?.payment?.cf_payment_id;
   if (!orderId) return;
 
   const status = paymentStatus === "SUCCESS" ? "SUCCESS"
@@ -107,22 +110,35 @@ export async function processCashfreeWebhook(event: {
     : "PENDING";
 
   await withTransaction(async (client) => {
-    const order = await client.query("SELECT * FROM payment_orders WHERE provider_order_id=$1 FOR UPDATE", [orderId]);
+    const order = await client.query(
+      "SELECT * FROM payment_orders WHERE provider_order_id=$1 FOR UPDATE",
+      [orderId]
+    );
     if (!order.rows[0]) return;
 
-    await client.query(
-      "INSERT INTO payment_events (id, payment_order_id, provider_event_id, provider_payment_id, event_type, payload) VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (provider_event_id) DO NOTHING",
-      [crypto.randomUUID(), order.rows[0].id, crypto.randomUUID(), paymentId ?? null, paymentStatus ?? "UNKNOWN", JSON.stringify(event)]
+    const inserted = await client.query(
+      "INSERT INTO payment_events (id, payment_order_id, provider_event_id, provider_payment_id, event_type, payload) VALUES ($1,$2,$3,$4,$5,$6::jsonb) ON CONFLICT (provider_event_id) DO NOTHING RETURNING id",
+      [crypto.randomUUID(), order.rows[0].id, providerEventId, paymentId ?? null, paymentStatus ?? "UNKNOWN", JSON.stringify(event)]
     );
+    if (!inserted.rowCount) return;
 
-    if (status === "SUCCESS" && order.rows[0].status !== "SUCCESS") {
-      await client.query("UPDATE payment_orders SET status='SUCCESS', updated_at=now() WHERE id=$1", [order.rows[0].id]);
+    const amountMatches = providerPaymentAmountPaise == null ||
+      Number(providerPaymentAmountPaise) === Number(order.rows[0].amount_paise);
+
+    if (status === "SUCCESS" && order.rows[0].status !== "SUCCESS" && amountMatches) {
+      await client.query(
+        "UPDATE payment_orders SET status='SUCCESS', updated_at=now() WHERE id=$1",
+        [order.rows[0].id]
+      );
       await client.query(
         "INSERT INTO ledger_entries (id, payment_order_id, direction, amount_paise, currency, account) VALUES ($1,$2,$3,$4,$5,$6)",
         [crypto.randomUUID(), order.rows[0].id, "CREDIT", order.rows[0].amount_paise, "INR", "provider_clearing"]
       );
-    } else if (status === "FAILED" && order.rows[0].status = ANY(ARRAY['CREATED','PENDING'])) {
-      await client.query("UPDATE payment_orders SET status='FAILED', updated_at=now() WHERE id=$1", [order.rows[0].id]);
+    } else if (status === "FAILED" && ["CREATED", "PENDING"].includes(order.rows[0].status)) {
+      await client.query(
+        "UPDATE payment_orders SET status='FAILED', updated_at=now() WHERE id=$1",
+        [order.rows[0].id]
+      );
     }
   });
 }
